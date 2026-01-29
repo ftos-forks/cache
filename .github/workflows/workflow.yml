@@ -90,17 +90,58 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: ubuntu:latest
-      options: --dns 127.0.0.1
+      options: --privileged
     services:
       squid-proxy:
         image: ubuntu/squid:latest
         ports:
           - 3128:3128
     env:
+      http_proxy: http://squid-proxy:3128
       https_proxy: http://squid-proxy:3128
+      HTTP_PROXY: http://squid-proxy:3128
+      HTTPS_PROXY: http://squid-proxy:3128
     steps:
     - name: Checkout
       uses: actions/checkout@v5
+    - name: Install iptables
+      run: |
+        apt-get update
+        apt-get install -y iptables dnsutils
+    - name: Block direct internet access (enforce proxy)
+      run: |
+        # Get squid-proxy IP address
+        PROXY_IP=$(getent hosts squid-proxy | awk '{ print $1 }')
+        echo "Proxy IP: $PROXY_IP"
+
+        # Allow established connections
+        iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+        # Allow loopback
+        iptables -A OUTPUT -o lo -j ACCEPT
+
+        # Allow connections to the proxy
+        iptables -A OUTPUT -d $PROXY_IP -p tcp --dport 3128 -j ACCEPT
+
+        # Allow DNS (needed for proxy to resolve hostnames)
+        iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
+        iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
+
+        # Block all other outbound HTTP/HTTPS traffic
+        iptables -A OUTPUT -p tcp --dport 80 -j REJECT
+        iptables -A OUTPUT -p tcp --dport 443 -j REJECT
+
+        echo "iptables rules applied:"
+        iptables -L OUTPUT -n -v
+    - name: Verify direct connections are blocked
+      run: |
+        # This should fail - direct HTTPS connection without proxy
+        if curl --connect-timeout 5 --max-time 10 --noproxy '*' https://github.com 2>/dev/null; then
+          echo "ERROR: Direct connection succeeded but should have been blocked!"
+          exit 1
+        else
+          echo "Direct connection correctly blocked"
+        fi
     - name: Generate files
       run: __tests__/create-cache-files.sh proxy test-cache
     - name: Save cache
@@ -114,17 +155,58 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: ubuntu:latest
-      options: --dns 127.0.0.1
+      options: --privileged
     services:
       squid-proxy:
         image: ubuntu/squid:latest
         ports:
           - 3128:3128
     env:
+      http_proxy: http://squid-proxy:3128
       https_proxy: http://squid-proxy:3128
+      HTTP_PROXY: http://squid-proxy:3128
+      HTTPS_PROXY: http://squid-proxy:3128
     steps:
     - name: Checkout
       uses: actions/checkout@v5
+    - name: Install iptables
+      run: |
+        apt-get update
+        apt-get install -y iptables dnsutils
+    - name: Block direct internet access (enforce proxy)
+      run: |
+        # Get squid-proxy IP address
+        PROXY_IP=$(getent hosts squid-proxy | awk '{ print $1 }')
+        echo "Proxy IP: $PROXY_IP"
+
+        # Allow established connections
+        iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+        # Allow loopback
+        iptables -A OUTPUT -o lo -j ACCEPT
+
+        # Allow connections to the proxy
+        iptables -A OUTPUT -d $PROXY_IP -p tcp --dport 3128 -j ACCEPT
+
+        # Allow DNS (needed for proxy to resolve hostnames)
+        iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
+        iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
+
+        # Block all other outbound HTTP/HTTPS traffic
+        iptables -A OUTPUT -p tcp --dport 80 -j REJECT
+        iptables -A OUTPUT -p tcp --dport 443 -j REJECT
+
+        echo "iptables rules applied:"
+        iptables -L OUTPUT -n -v
+    - name: Verify direct connections are blocked
+      run: |
+        # This should fail - direct HTTPS connection without proxy
+        if curl --connect-timeout 5 --max-time 10 --noproxy '*' https://github.com 2>/dev/null; then
+          echo "ERROR: Direct connection succeeded but should have been blocked!"
+          exit 1
+        else
+          echo "Direct connection correctly blocked"
+        fi
     - name: Restore cache
       uses: ./
       with:
