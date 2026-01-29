@@ -93,7 +93,7 @@ jobs:
       options: --privileged
     services:
       squid-proxy:
-        image: sameersbn/squid:latest
+        image: wernight/squid
         ports:
           - 3128:3128
     steps:
@@ -109,22 +109,37 @@ jobs:
         echo "Fetching GitHub meta API..."
         curl -sS https://api.github.com/meta > /tmp/github-meta.json
 
-        # Wait for squid-proxy service to be resolvable
+        # Wait for squid-proxy service to be resolvable and accepting connections
         echo "Waiting for squid-proxy service..."
-        for i in 1 2 3 4 5 6 7 8 9 10; do
+        for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
           PROXY_IP=$(getent hosts squid-proxy | awk '{ print $1 }')
           if [ -n "$PROXY_IP" ]; then
             echo "squid-proxy resolved to: $PROXY_IP"
-            break
+            # Test that proxy is actually accepting connections
+            if curl --connect-timeout 2 --max-time 5 -x http://squid-proxy:3128 -sS https://api.github.com/zen 2>/dev/null; then
+              echo "Proxy is working!"
+              break
+            else
+              echo "Attempt $i: Proxy resolved but not ready yet, waiting..."
+            fi
+          else
+            echo "Attempt $i: squid-proxy not resolvable yet, waiting..."
           fi
-          echo "Attempt $i: squid-proxy not resolvable yet, waiting..."
           sleep 2
         done
 
         if [ -z "$PROXY_IP" ]; then
-          echo "ERROR: Could not resolve squid-proxy after 10 attempts"
+          echo "ERROR: Could not resolve squid-proxy after 15 attempts"
           exit 1
         fi
+
+        # Verify proxy works before locking down firewall
+        echo "Final proxy connectivity test..."
+        if ! curl --connect-timeout 5 --max-time 10 -x http://squid-proxy:3128 -sS https://api.github.com/zen; then
+          echo "ERROR: Proxy is not working properly"
+          exit 1
+        fi
+        echo "Proxy verified working!"
 
         # Allow established connections
         iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
@@ -186,38 +201,44 @@ jobs:
         echo ""
         echo "ipset github-ips contains $(ipset list github-ips | grep -c '^[0-9]') entries"
     - name: Verify proxy enforcement
-      env:
-        http_proxy: http://squid-proxy:3128
-        https_proxy: http://squid-proxy:3128
       run: |
         echo "=== Testing proxy enforcement ==="
 
-        # Test 1: Direct connection to github.com should work (it's in allowed IPs)
-        echo "Test 1: Direct connection to github.com (should SUCCEED - GitHub IP allowed)"
-        if curl --connect-timeout 5 --max-time 10 --noproxy '*' -sS https://api.github.com/zen 2>/dev/null; then
-          echo "✓ Direct GitHub API access works (expected)"
+        # Test 1: Verify proxy is working by explicitly using it
+        echo "Test 1: Connection through proxy (should SUCCEED)"
+        if curl --connect-timeout 10 --max-time 15 -x http://squid-proxy:3128 -sS -o /dev/null -w "%{http_code}" https://api.github.com/zen; then
+          echo ""
+          echo "✓ Proxy connection works"
         else
-          echo "✗ Direct GitHub API access failed (unexpected but not critical)"
+          echo "✗ ERROR: Proxy is not working!"
+          exit 1
         fi
 
-        # Test 2: Direct connection to blob storage should FAIL
+        # Test 2: Direct connection to blob storage should FAIL (blocked by iptables)
         echo ""
-        echo "Test 2: Direct connection to blob storage (should FAIL - must use proxy)"
+        echo "Test 2: Direct connection to blob storage (should FAIL - blocked by iptables)"
         if curl --connect-timeout 5 --max-time 10 --noproxy '*' -sS https://productionresultssa0.blob.core.windows.net 2>/dev/null; then
           echo "✗ ERROR: Direct blob storage connection succeeded but should have been blocked!"
           exit 1
         else
-          echo "✓ Direct blob storage correctly blocked"
+          echo "✓ Direct blob storage correctly blocked by iptables"
         fi
 
-        # Test 3: Connection through proxy should work
+        # Test 3: Connection to blob storage THROUGH proxy should work
         echo ""
         echo "Test 3: Connection through proxy to blob storage (should SUCCEED)"
-        if curl --connect-timeout 5 --max-time 10 -sS https://productionresultssa0.blob.core.windows.net 2>&1 | head -5; then
-          echo "✓ Proxy connection works (expected - even if 4xx/5xx response, connection succeeded)"
+        HTTP_CODE=$(curl --connect-timeout 10 --max-time 15 -x http://squid-proxy:3128 -sS -o /dev/null -w "%{http_code}" https://productionresultssa0.blob.core.windows.net 2>&1) || true
+        echo "HTTP response code: $HTTP_CODE"
+        if [ "$HTTP_CODE" = "400" ] || [ "$HTTP_CODE" = "409" ] || [ "$HTTP_CODE" = "200" ]; then
+          echo "✓ Proxy successfully forwarded request to blob storage (got HTTP $HTTP_CODE)"
         else
-          echo "Note: Proxy connection may have failed, but that's OK if it's not a network block"
+          echo "✗ ERROR: Proxy failed to forward request (got: $HTTP_CODE)"
+          exit 1
         fi
+        
+        echo ""
+        echo "=== All proxy enforcement tests passed ==="
+        echo "The proxy is working. If cache operations fail, it's because the action doesn't use the proxy."
     - name: Generate files
       run: __tests__/create-cache-files.sh proxy test-cache
     - name: Save cache
@@ -253,7 +274,7 @@ jobs:
       options: --privileged
     services:
       squid-proxy:
-        image: sameersbn/squid:latest
+        image: wernight/squid
         ports:
           - 3128:3128
     steps:
@@ -269,22 +290,37 @@ jobs:
         echo "Fetching GitHub meta API..."
         curl -sS https://api.github.com/meta > /tmp/github-meta.json
 
-        # Wait for squid-proxy service to be resolvable
+        # Wait for squid-proxy service to be resolvable and accepting connections
         echo "Waiting for squid-proxy service..."
-        for i in 1 2 3 4 5 6 7 8 9 10; do
+        for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
           PROXY_IP=$(getent hosts squid-proxy | awk '{ print $1 }')
           if [ -n "$PROXY_IP" ]; then
             echo "squid-proxy resolved to: $PROXY_IP"
-            break
+            # Test that proxy is actually accepting connections
+            if curl --connect-timeout 2 --max-time 5 -x http://squid-proxy:3128 -sS https://api.github.com/zen 2>/dev/null; then
+              echo "Proxy is working!"
+              break
+            else
+              echo "Attempt $i: Proxy resolved but not ready yet, waiting..."
+            fi
+          else
+            echo "Attempt $i: squid-proxy not resolvable yet, waiting..."
           fi
-          echo "Attempt $i: squid-proxy not resolvable yet, waiting..."
           sleep 2
         done
 
         if [ -z "$PROXY_IP" ]; then
-          echo "ERROR: Could not resolve squid-proxy after 10 attempts"
+          echo "ERROR: Could not resolve squid-proxy after 15 attempts"
           exit 1
         fi
+
+        # Verify proxy works before locking down firewall
+        echo "Final proxy connectivity test..."
+        if ! curl --connect-timeout 5 --max-time 10 -x http://squid-proxy:3128 -sS https://api.github.com/zen; then
+          echo "ERROR: Proxy is not working properly"
+          exit 1
+        fi
+        echo "Proxy verified working!"
 
         # Allow established connections
         iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
@@ -346,38 +382,44 @@ jobs:
         echo ""
         echo "ipset github-ips contains $(ipset list github-ips | grep -c '^[0-9]') entries"
     - name: Verify proxy enforcement
-      env:
-        http_proxy: http://squid-proxy:3128
-        https_proxy: http://squid-proxy:3128
       run: |
         echo "=== Testing proxy enforcement ==="
 
-        # Test 1: Direct connection to github.com should work (it's in allowed IPs)
-        echo "Test 1: Direct connection to github.com (should SUCCEED - GitHub IP allowed)"
-        if curl --connect-timeout 5 --max-time 10 --noproxy '*' -sS https://api.github.com/zen 2>/dev/null; then
-          echo "✓ Direct GitHub API access works (expected)"
+        # Test 1: Verify proxy is working by explicitly using it
+        echo "Test 1: Connection through proxy (should SUCCEED)"
+        if curl --connect-timeout 10 --max-time 15 -x http://squid-proxy:3128 -sS -o /dev/null -w "%{http_code}" https://api.github.com/zen; then
+          echo ""
+          echo "✓ Proxy connection works"
         else
-          echo "✗ Direct GitHub API access failed (unexpected but not critical)"
+          echo "✗ ERROR: Proxy is not working!"
+          exit 1
         fi
 
-        # Test 2: Direct connection to blob storage should FAIL
+        # Test 2: Direct connection to blob storage should FAIL (blocked by iptables)
         echo ""
-        echo "Test 2: Direct connection to blob storage (should FAIL - must use proxy)"
+        echo "Test 2: Direct connection to blob storage (should FAIL - blocked by iptables)"
         if curl --connect-timeout 5 --max-time 10 --noproxy '*' -sS https://productionresultssa0.blob.core.windows.net 2>/dev/null; then
           echo "✗ ERROR: Direct blob storage connection succeeded but should have been blocked!"
           exit 1
         else
-          echo "✓ Direct blob storage correctly blocked"
+          echo "✓ Direct blob storage correctly blocked by iptables"
         fi
 
-        # Test 3: Connection through proxy should work
+        # Test 3: Connection to blob storage THROUGH proxy should work
         echo ""
         echo "Test 3: Connection through proxy to blob storage (should SUCCEED)"
-        if curl --connect-timeout 5 --max-time 10 -sS https://productionresultssa0.blob.core.windows.net 2>&1 | head -5; then
-          echo "✓ Proxy connection works (expected - even if 4xx/5xx response, connection succeeded)"
+        HTTP_CODE=$(curl --connect-timeout 10 --max-time 15 -x http://squid-proxy:3128 -sS -o /dev/null -w "%{http_code}" https://productionresultssa0.blob.core.windows.net 2>&1) || true
+        echo "HTTP response code: $HTTP_CODE"
+        if [ "$HTTP_CODE" = "400" ] || [ "$HTTP_CODE" = "409" ] || [ "$HTTP_CODE" = "200" ]; then
+          echo "✓ Proxy successfully forwarded request to blob storage (got HTTP $HTTP_CODE)"
         else
-          echo "Note: Proxy connection may have failed, but that's OK if it's not a network block"
+          echo "✗ ERROR: Proxy failed to forward request (got: $HTTP_CODE)"
+          exit 1
         fi
+        
+        echo ""
+        echo "=== All proxy enforcement tests passed ==="
+        echo "The proxy is working. If cache operations fail, it's because the action doesn't use the proxy."
     - name: Restore cache
       env:
         http_proxy: http://squid-proxy:3128
