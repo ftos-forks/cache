@@ -91,14 +91,15 @@ jobs:
     container:
       image: ubuntu:latest
       options: --privileged
+      volumes:
+        - /tmp/squid-logs:/shared-logs
     services:
       squid-proxy:
         image: ubuntu/squid:latest
         ports:
           - 3128:3128
-    env:
-      http_proxy: http://squid-proxy:3128
-      https_proxy: http://squid-proxy:3128
+        volumes:
+          - /tmp/squid-logs:/var/log/squid
     steps:
     - name: Checkout
       uses: actions/checkout@v5
@@ -173,6 +174,9 @@ jobs:
         echo ""
         echo "ipset github-ips contains $(ipset list github-ips | grep -c '^[0-9]') entries"
     - name: Verify proxy enforcement
+      env:
+        http_proxy: http://squid-proxy:3128
+        https_proxy: http://squid-proxy:3128
       run: |
         echo "=== Testing proxy enforcement ==="
 
@@ -205,6 +209,9 @@ jobs:
     - name: Generate files
       run: __tests__/create-cache-files.sh proxy test-cache
     - name: Save cache
+      env:
+        http_proxy: http://squid-proxy:3128
+        https_proxy: http://squid-proxy:3128
       uses: ./
       with:
         key: test-proxy-${{ github.run_id }}
@@ -213,22 +220,18 @@ jobs:
       run: |
         echo "=== Verifying cache traffic went through proxy ==="
         
-        # Get the squid container ID
-        SQUID_CONTAINER=$(docker ps --filter "ancestor=ubuntu/squid:latest" --format "{{.ID}}" | head -1)
-        
-        if [ -z "$SQUID_CONTAINER" ]; then
-          SQUID_CONTAINER=$(docker ps --format "{{.ID}}\t{{.Image}}" | grep squid | cut -f1)
-        fi
+        # Read from shared volume where squid logs are mounted
+        SQUID_LOG="/shared-logs/access.log"
         
         # Initialize summary
         echo "## 🔒 Proxy Traffic Verification - Cache Save" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
-        if [ -n "$SQUID_CONTAINER" ]; then
-          echo "Found Squid container: $SQUID_CONTAINER"
+        if [ -f "$SQUID_LOG" ]; then
+          echo "Found Squid access log at $SQUID_LOG"
           
           # Get the full access log
-          ACCESS_LOG=$(docker exec "$SQUID_CONTAINER" cat /var/log/squid/access.log 2>/dev/null || echo "")
+          ACCESS_LOG=$(cat "$SQUID_LOG" 2>/dev/null || echo "")
           
           # Extract traffic details
           RESULTS_RECEIVER_LINES=$(echo "$ACCESS_LOG" | grep -i "results-receiver" || true)
@@ -315,10 +318,12 @@ jobs:
           echo "Blob storage requests: $BLOB_COUNT"
           echo "Verification status: $VERIFY_STATUS"
         else
-          echo "⚠️ **WARNING**: Could not access Squid proxy container logs" >> $GITHUB_STEP_SUMMARY
+          echo "⚠️ **WARNING**: Could not access Squid proxy logs" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "This may occur when service containers are isolated from the job container." >> $GITHUB_STEP_SUMMARY
-          echo "Could not access squid container logs"
+          echo "The shared log volume may not be accessible at $SQUID_LOG" >> $GITHUB_STEP_SUMMARY
+          echo "Checking what's in /shared-logs/:"
+          ls -la /shared-logs/ || echo "Directory not accessible"
+          echo "Could not access squid access log at $SQUID_LOG"
         fi
 
   test-proxy-restore:
@@ -327,14 +332,15 @@ jobs:
     container:
       image: ubuntu:latest
       options: --privileged
+      volumes:
+        - /tmp/squid-logs:/shared-logs
     services:
       squid-proxy:
         image: ubuntu/squid:latest
         ports:
           - 3128:3128
-    env:
-      http_proxy: http://squid-proxy:3128
-      https_proxy: http://squid-proxy:3128
+        volumes:
+          - /tmp/squid-logs:/var/log/squid
     steps:
     - name: Checkout
       uses: actions/checkout@v5
@@ -409,6 +415,9 @@ jobs:
         echo ""
         echo "ipset github-ips contains $(ipset list github-ips | grep -c '^[0-9]') entries"
     - name: Verify proxy enforcement
+      env:
+        http_proxy: http://squid-proxy:3128
+        https_proxy: http://squid-proxy:3128
       run: |
         echo "=== Testing proxy enforcement ==="
 
@@ -439,6 +448,9 @@ jobs:
           echo "Note: Proxy connection may have failed, but that's OK if it's not a network block"
         fi
     - name: Restore cache
+      env:
+        http_proxy: http://squid-proxy:3128
+        https_proxy: http://squid-proxy:3128
       uses: ./
       with:
         key: test-proxy-${{ github.run_id }}
@@ -447,22 +459,18 @@ jobs:
       run: |
         echo "=== Verifying cache restore traffic went through proxy ==="
         
-        # Get the squid container ID
-        SQUID_CONTAINER=$(docker ps --filter "ancestor=ubuntu/squid:latest" --format "{{.ID}}" | head -1)
-        
-        if [ -z "$SQUID_CONTAINER" ]; then
-          SQUID_CONTAINER=$(docker ps --format "{{.ID}}\t{{.Image}}" | grep squid | cut -f1)
-        fi
+        # Read from shared volume where squid logs are mounted
+        SQUID_LOG="/shared-logs/access.log"
         
         # Initialize summary
         echo "## 🔒 Proxy Traffic Verification - Cache Restore" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
-        if [ -n "$SQUID_CONTAINER" ]; then
-          echo "Found Squid container: $SQUID_CONTAINER"
+        if [ -f "$SQUID_LOG" ]; then
+          echo "Found Squid access log at $SQUID_LOG"
           
           # Get the full access log
-          ACCESS_LOG=$(docker exec "$SQUID_CONTAINER" cat /var/log/squid/access.log 2>/dev/null || echo "")
+          ACCESS_LOG=$(cat "$SQUID_LOG" 2>/dev/null || echo "")
           
           # Extract traffic details
           RESULTS_RECEIVER_LINES=$(echo "$ACCESS_LOG" | grep -i "results-receiver" || true)
@@ -548,10 +556,12 @@ jobs:
           echo "Blob storage requests: $BLOB_COUNT"
           echo "Verification status: $VERIFY_STATUS"
         else
-          echo "⚠️ **WARNING**: Could not access Squid proxy container logs" >> $GITHUB_STEP_SUMMARY
+          echo "⚠️ **WARNING**: Could not access Squid proxy logs" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "This may occur when service containers are isolated from the job container." >> $GITHUB_STEP_SUMMARY
-          echo "Could not access squid container logs"
+          echo "The shared log volume may not be accessible at $SQUID_LOG" >> $GITHUB_STEP_SUMMARY
+          echo "Checking what's in /shared-logs/:"
+          ls -la /shared-logs/ || echo "Directory not accessible"
+          echo "Could not access squid access log at $SQUID_LOG"
         fi
     - name: Verify cache
       run: __tests__/verify-cache-files.sh proxy test-cache
