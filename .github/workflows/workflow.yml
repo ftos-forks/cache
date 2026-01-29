@@ -113,9 +113,22 @@ jobs:
         echo "Fetching GitHub meta API..."
         curl -sS https://api.github.com/meta > /tmp/github-meta.json
 
-        # Get squid-proxy IP address
-        PROXY_IP=$(getent hosts squid-proxy | awk '{ print $1 }')
-        echo "Proxy IP: $PROXY_IP"
+        # Wait for squid-proxy service to be resolvable
+        echo "Waiting for squid-proxy service..."
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+          PROXY_IP=$(getent hosts squid-proxy | awk '{ print $1 }')
+          if [ -n "$PROXY_IP" ]; then
+            echo "squid-proxy resolved to: $PROXY_IP"
+            break
+          fi
+          echo "Attempt $i: squid-proxy not resolvable yet, waiting..."
+          sleep 2
+        done
+
+        if [ -z "$PROXY_IP" ]; then
+          echo "ERROR: Could not resolve squid-proxy after 10 attempts"
+          exit 1
+        fi
 
         # Allow established connections
         iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
@@ -354,9 +367,22 @@ jobs:
         echo "Fetching GitHub meta API..."
         curl -sS https://api.github.com/meta > /tmp/github-meta.json
 
-        # Get squid-proxy IP address
-        PROXY_IP=$(getent hosts squid-proxy | awk '{ print $1 }')
-        echo "Proxy IP: $PROXY_IP"
+        # Wait for squid-proxy service to be resolvable
+        echo "Waiting for squid-proxy service..."
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+          PROXY_IP=$(getent hosts squid-proxy | awk '{ print $1 }')
+          if [ -n "$PROXY_IP" ]; then
+            echo "squid-proxy resolved to: $PROXY_IP"
+            break
+          fi
+          echo "Attempt $i: squid-proxy not resolvable yet, waiting..."
+          sleep 2
+        done
+
+        if [ -z "$PROXY_IP" ]; then
+          echo "ERROR: Could not resolve squid-proxy after 10 attempts"
+          exit 1
+        fi
 
         # Allow established connections
         iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
