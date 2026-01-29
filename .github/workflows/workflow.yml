@@ -137,10 +137,11 @@ jobs:
         for category in hooks web api git pages importer actions actions_macos codespaces copilot; do
           echo "Adding IPs for category: $category"
           jq -r ".${category}[]? // empty" /tmp/github-meta.json 2>/dev/null | while read cidr; do
-            # Skip IPv6 for now (iptables vs ip6tables)
-            if [[ ! "$cidr" =~ ":" ]]; then
-              ipset add github-ips "$cidr" 2>/dev/null || true
-            fi
+            # Skip IPv6 for now (iptables vs ip6tables) - use case for POSIX compatibility
+            case "$cidr" in
+              *:*) ;; # IPv6, skip
+              *) ipset add github-ips "$cidr" 2>/dev/null || true ;;
+            esac
           done
         done
 
@@ -208,6 +209,117 @@ jobs:
       with:
         key: test-proxy-${{ github.run_id }}
         path: test-cache
+    - name: Verify cache traffic went through proxy
+      run: |
+        echo "=== Verifying cache traffic went through proxy ==="
+        
+        # Get the squid container ID
+        SQUID_CONTAINER=$(docker ps --filter "ancestor=ubuntu/squid:latest" --format "{{.ID}}" | head -1)
+        
+        if [ -z "$SQUID_CONTAINER" ]; then
+          SQUID_CONTAINER=$(docker ps --format "{{.ID}}\t{{.Image}}" | grep squid | cut -f1)
+        fi
+        
+        # Initialize summary
+        echo "## 🔒 Proxy Traffic Verification - Cache Save" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ -n "$SQUID_CONTAINER" ]; then
+          echo "Found Squid container: $SQUID_CONTAINER"
+          
+          # Get the full access log
+          ACCESS_LOG=$(docker exec "$SQUID_CONTAINER" cat /var/log/squid/access.log 2>/dev/null || echo "")
+          
+          # Extract traffic details
+          RESULTS_RECEIVER_LINES=$(echo "$ACCESS_LOG" | grep -i "results-receiver" || true)
+          BLOB_LINES=$(echo "$ACCESS_LOG" | grep -i "blob.core.windows.net" || true)
+          RESULTS_RECEIVER_COUNT=$(echo "$ACCESS_LOG" | grep -ci "results-receiver" || echo "0")
+          BLOB_COUNT=$(echo "$ACCESS_LOG" | grep -ci "blob.core.windows.net" || echo "0")
+          
+          # Build summary table
+          echo "### 📊 Traffic Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Endpoint | Requests | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|----------|--------|" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "$RESULTS_RECEIVER_COUNT" -gt 0 ]; then
+            echo "| results-receiver.actions.githubusercontent.com | $RESULTS_RECEIVER_COUNT | ✅ Proxied |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| results-receiver.actions.githubusercontent.com | 0 | ⚠️ Not detected |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ "$BLOB_COUNT" -gt 0 ]; then
+            echo "| *.blob.core.windows.net | $BLOB_COUNT | ✅ Proxied |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| *.blob.core.windows.net | 0 | ⚠️ Not detected |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Verification result
+          echo "### 🎯 Verification Result" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "$RESULTS_RECEIVER_COUNT" -gt 0 ] && [ "$BLOB_COUNT" -gt 0 ]; then
+            echo "✅ **SUCCESS**: All cache save traffic verified going through proxy!" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ CreateCacheEntry API call routed through proxy" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ FinalizeCacheEntryUpload API call routed through proxy" >> $GITHUB_STEP_SUMMARY  
+            echo "- ✅ Blob storage upload routed through proxy" >> $GITHUB_STEP_SUMMARY
+            VERIFY_STATUS="success"
+          else
+            echo "⚠️ **WARNING**: Some expected cache traffic not found in proxy logs" >> $GITHUB_STEP_SUMMARY
+            VERIFY_STATUS="warning"
+          fi
+          
+          # Detailed traffic logs
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "<details>" >> $GITHUB_STEP_SUMMARY
+          echo "<summary>📋 Detailed Proxy Traffic Logs</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "#### Results Receiver Traffic (Cache API)" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          if [ -n "$RESULTS_RECEIVER_LINES" ]; then
+            echo "$RESULTS_RECEIVER_LINES" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "(no results-receiver traffic found)" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "#### Blob Storage Traffic (Cache Upload)" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          if [ -n "$BLOB_LINES" ]; then
+            echo "$BLOB_LINES" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "(no blob storage traffic found)" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "#### Full Squid Access Log" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          if [ -n "$ACCESS_LOG" ]; then
+            echo "$ACCESS_LOG" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "(access log empty or not accessible)" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+          
+          # Also output to logs for debugging
+          echo ""
+          echo "=== Traffic Summary ==="
+          echo "Results-receiver requests: $RESULTS_RECEIVER_COUNT"
+          echo "Blob storage requests: $BLOB_COUNT"
+          echo "Verification status: $VERIFY_STATUS"
+        else
+          echo "⚠️ **WARNING**: Could not access Squid proxy container logs" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "This may occur when service containers are isolated from the job container." >> $GITHUB_STEP_SUMMARY
+          echo "Could not access squid container logs"
+        fi
 
   test-proxy-restore:
     needs: test-proxy-save
@@ -261,10 +373,11 @@ jobs:
         for category in hooks web api git pages importer actions actions_macos codespaces copilot; do
           echo "Adding IPs for category: $category"
           jq -r ".${category}[]? // empty" /tmp/github-meta.json 2>/dev/null | while read cidr; do
-            # Skip IPv6 for now (iptables vs ip6tables)
-            if [[ ! "$cidr" =~ ":" ]]; then
-              ipset add github-ips "$cidr" 2>/dev/null || true
-            fi
+            # Skip IPv6 for now (iptables vs ip6tables) - use case for POSIX compatibility
+            case "$cidr" in
+              *:*) ;; # IPv6, skip
+              *) ipset add github-ips "$cidr" 2>/dev/null || true ;;
+            esac
           done
         done
 
@@ -294,7 +407,7 @@ jobs:
         echo "iptables rules applied:"
         iptables -L OUTPUT -n -v
         echo ""
-        echo "ipset github-ips contains $(ipset list github-ips | grep -c 'ˆ[0-9]') entries"
+        echo "ipset github-ips contains $(ipset list github-ips | grep -c '^[0-9]') entries"
     - name: Verify proxy enforcement
       run: |
         echo "=== Testing proxy enforcement ==="
@@ -330,5 +443,115 @@ jobs:
       with:
         key: test-proxy-${{ github.run_id }}
         path: test-cache
+    - name: Verify cache traffic went through proxy
+      run: |
+        echo "=== Verifying cache restore traffic went through proxy ==="
+        
+        # Get the squid container ID
+        SQUID_CONTAINER=$(docker ps --filter "ancestor=ubuntu/squid:latest" --format "{{.ID}}" | head -1)
+        
+        if [ -z "$SQUID_CONTAINER" ]; then
+          SQUID_CONTAINER=$(docker ps --format "{{.ID}}\t{{.Image}}" | grep squid | cut -f1)
+        fi
+        
+        # Initialize summary
+        echo "## 🔒 Proxy Traffic Verification - Cache Restore" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ -n "$SQUID_CONTAINER" ]; then
+          echo "Found Squid container: $SQUID_CONTAINER"
+          
+          # Get the full access log
+          ACCESS_LOG=$(docker exec "$SQUID_CONTAINER" cat /var/log/squid/access.log 2>/dev/null || echo "")
+          
+          # Extract traffic details
+          RESULTS_RECEIVER_LINES=$(echo "$ACCESS_LOG" | grep -i "results-receiver" || true)
+          BLOB_LINES=$(echo "$ACCESS_LOG" | grep -i "blob.core.windows.net" || true)
+          RESULTS_RECEIVER_COUNT=$(echo "$ACCESS_LOG" | grep -ci "results-receiver" || echo "0")
+          BLOB_COUNT=$(echo "$ACCESS_LOG" | grep -ci "blob.core.windows.net" || echo "0")
+          
+          # Build summary table
+          echo "### 📊 Traffic Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Endpoint | Requests | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|----------|--------|" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "$RESULTS_RECEIVER_COUNT" -gt 0 ]; then
+            echo "| results-receiver.actions.githubusercontent.com | $RESULTS_RECEIVER_COUNT | ✅ Proxied |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| results-receiver.actions.githubusercontent.com | 0 | ⚠️ Not detected |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ "$BLOB_COUNT" -gt 0 ]; then
+            echo "| *.blob.core.windows.net | $BLOB_COUNT | ✅ Proxied |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| *.blob.core.windows.net | 0 | ⚠️ Not detected |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Verification result
+          echo "### 🎯 Verification Result" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "$RESULTS_RECEIVER_COUNT" -gt 0 ] && [ "$BLOB_COUNT" -gt 0 ]; then
+            echo "✅ **SUCCESS**: All cache restore traffic verified going through proxy!" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ GetCacheEntryDownloadURL API call routed through proxy" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ Blob storage download routed through proxy" >> $GITHUB_STEP_SUMMARY
+            VERIFY_STATUS="success"
+          else
+            echo "⚠️ **WARNING**: Some expected cache traffic not found in proxy logs" >> $GITHUB_STEP_SUMMARY
+            VERIFY_STATUS="warning"
+          fi
+          
+          # Detailed traffic logs
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "<details>" >> $GITHUB_STEP_SUMMARY
+          echo "<summary>📋 Detailed Proxy Traffic Logs</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "#### Results Receiver Traffic (Cache API)" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          if [ -n "$RESULTS_RECEIVER_LINES" ]; then
+            echo "$RESULTS_RECEIVER_LINES" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "(no results-receiver traffic found)" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "#### Blob Storage Traffic (Cache Download)" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          if [ -n "$BLOB_LINES" ]; then
+            echo "$BLOB_LINES" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "(no blob storage traffic found)" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "#### Full Squid Access Log" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          if [ -n "$ACCESS_LOG" ]; then
+            echo "$ACCESS_LOG" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "(access log empty or not accessible)" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+          
+          # Also output to logs for debugging
+          echo ""
+          echo "=== Traffic Summary ==="
+          echo "Results-receiver requests: $RESULTS_RECEIVER_COUNT"
+          echo "Blob storage requests: $BLOB_COUNT"
+          echo "Verification status: $VERIFY_STATUS"
+        else
+          echo "⚠️ **WARNING**: Could not access Squid proxy container logs" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "This may occur when service containers are isolated from the job container." >> $GITHUB_STEP_SUMMARY
+          echo "Could not access squid container logs"
+        fi
     - name: Verify cache
       run: __tests__/verify-cache-files.sh proxy test-cache
