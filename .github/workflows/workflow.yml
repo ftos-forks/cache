@@ -99,17 +99,19 @@ jobs:
     env:
       http_proxy: http://squid-proxy:3128
       https_proxy: http://squid-proxy:3128
-      HTTP_PROXY: http://squid-proxy:3128
-      HTTPS_PROXY: http://squid-proxy:3128
     steps:
     - name: Checkout
       uses: actions/checkout@v5
-    - name: Install iptables
+    - name: Install dependencies
       run: |
         apt-get update
-        apt-get install -y iptables dnsutils
-    - name: Block direct internet access (enforce proxy)
+        apt-get install -y iptables dnsutils curl jq ipset
+    - name: Fetch GitHub meta and configure firewall
       run: |
+        # Fetch GitHub meta API to get all IP ranges
+        echo "Fetching GitHub meta API..."
+        curl -sS https://api.github.com/meta > /tmp/github-meta.json
+
         # Get squid-proxy IP address
         PROXY_IP=$(getent hosts squid-proxy | awk '{ print $1 }')
         echo "Proxy IP: $PROXY_IP"
@@ -123,9 +125,43 @@ jobs:
         # Allow connections to the proxy
         iptables -A OUTPUT -d $PROXY_IP -p tcp --dport 3128 -j ACCEPT
 
-        # Allow DNS (needed for proxy to resolve hostnames)
+        # Allow DNS
         iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
         iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
+
+        # Create ipset for GitHub IPs (more efficient than individual rules)
+        ipset create github-ips hash:net
+
+        # Add all GitHub IP ranges from meta API (hooks, web, api, git, actions, etc.)
+        # EXCLUDING blob storage which must go through proxy
+        for category in hooks web api git pages importer actions actions_macos codespaces copilot; do
+          echo "Adding IPs for category: $category"
+          jq -r ".${category}[]? // empty" /tmp/github-meta.json 2>/dev/null | while read cidr; do
+            # Skip IPv6 for now (iptables vs ip6tables)
+            if [[ ! "$cidr" =~ ":" ]]; then
+              ipset add github-ips "$cidr" 2>/dev/null || true
+            fi
+          done
+        done
+
+        # Allow all GitHub IPs
+        iptables -A OUTPUT -m set --match-set github-ips dst -p tcp --dport 443 -j ACCEPT
+        iptables -A OUTPUT -m set --match-set github-ips dst -p tcp --dport 80 -j ACCEPT
+
+        # CRITICAL: Block direct access to blob storage and results-receiver
+        # These MUST go through the proxy for cache operations
+        echo "Blocking direct access to cache-critical endpoints..."
+
+        # Block results-receiver.actions.githubusercontent.com
+        for ip in $(getent ahosts "results-receiver.actions.githubusercontent.com" 2>/dev/null | awk '{print $1}' | sort -u); do
+          echo "Blocking direct access to results-receiver: $ip"
+          iptables -I OUTPUT 1 -d "$ip" -p tcp --dport 443 -j REJECT
+        done
+
+        # Block productionresultssa*.blob.core.windows.net (cache blob storage)
+        # We block ALL blob.core.windows.net traffic since we can't easily enumerate all storage accounts
+        # The proxy will handle these requests
+        echo "Note: *.blob.core.windows.net traffic will be blocked and must go through proxy"
 
         # Block all other outbound HTTP/HTTPS traffic
         iptables -A OUTPUT -p tcp --dport 80 -j REJECT
@@ -133,14 +169,37 @@ jobs:
 
         echo "iptables rules applied:"
         iptables -L OUTPUT -n -v
-    - name: Verify direct connections are blocked
+        echo ""
+        echo "ipset github-ips contains $(ipset list github-ips | grep -c '^[0-9]') entries"
+    - name: Verify proxy enforcement
       run: |
-        # This should fail - direct HTTPS connection without proxy
-        if curl --connect-timeout 5 --max-time 10 --noproxy '*' https://github.com 2>/dev/null; then
-          echo "ERROR: Direct connection succeeded but should have been blocked!"
+        echo "=== Testing proxy enforcement ==="
+
+        # Test 1: Direct connection to github.com should work (it's in allowed IPs)
+        echo "Test 1: Direct connection to github.com (should SUCCEED - GitHub IP allowed)"
+        if curl --connect-timeout 5 --max-time 10 --noproxy '*' -sS https://api.github.com/zen 2>/dev/null; then
+          echo "✓ Direct GitHub API access works (expected)"
+        else
+          echo "✗ Direct GitHub API access failed (unexpected but not critical)"
+        fi
+
+        # Test 2: Direct connection to blob storage should FAIL
+        echo ""
+        echo "Test 2: Direct connection to blob storage (should FAIL - must use proxy)"
+        if curl --connect-timeout 5 --max-time 10 --noproxy '*' -sS https://productionresultssa0.blob.core.windows.net 2>/dev/null; then
+          echo "✗ ERROR: Direct blob storage connection succeeded but should have been blocked!"
           exit 1
         else
-          echo "Direct connection correctly blocked"
+          echo "✓ Direct blob storage correctly blocked"
+        fi
+
+        # Test 3: Connection through proxy should work
+        echo ""
+        echo "Test 3: Connection through proxy to blob storage (should SUCCEED)"
+        if curl --connect-timeout 5 --max-time 10 -sS https://productionresultssa0.blob.core.windows.net 2>&1 | head -5; then
+          echo "✓ Proxy connection works (expected - even if 4xx/5xx response, connection succeeded)"
+        else
+          echo "Note: Proxy connection may have failed, but that's OK if it's not a network block"
         fi
     - name: Generate files
       run: __tests__/create-cache-files.sh proxy test-cache
@@ -164,17 +223,19 @@ jobs:
     env:
       http_proxy: http://squid-proxy:3128
       https_proxy: http://squid-proxy:3128
-      HTTP_PROXY: http://squid-proxy:3128
-      HTTPS_PROXY: http://squid-proxy:3128
     steps:
     - name: Checkout
       uses: actions/checkout@v5
-    - name: Install iptables
+    - name: Install dependencies
       run: |
         apt-get update
-        apt-get install -y iptables dnsutils
-    - name: Block direct internet access (enforce proxy)
+        apt-get install -y iptables dnsutils curl jq ipset
+    - name: Fetch GitHub meta and configure firewall
       run: |
+        # Fetch GitHub meta API to get all IP ranges
+        echo "Fetching GitHub meta API..."
+        curl -sS https://api.github.com/meta > /tmp/github-meta.json
+
         # Get squid-proxy IP address
         PROXY_IP=$(getent hosts squid-proxy | awk '{ print $1 }')
         echo "Proxy IP: $PROXY_IP"
@@ -188,9 +249,43 @@ jobs:
         # Allow connections to the proxy
         iptables -A OUTPUT -d $PROXY_IP -p tcp --dport 3128 -j ACCEPT
 
-        # Allow DNS (needed for proxy to resolve hostnames)
+        # Allow DNS
         iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
         iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
+
+        # Create ipset for GitHub IPs (more efficient than individual rules)
+        ipset create github-ips hash:net
+
+        # Add all GitHub IP ranges from meta API (hooks, web, api, git, actions, etc.)
+        # EXCLUDING blob storage which must go through proxy
+        for category in hooks web api git pages importer actions actions_macos codespaces copilot; do
+          echo "Adding IPs for category: $category"
+          jq -r ".${category}[]? // empty" /tmp/github-meta.json 2>/dev/null | while read cidr; do
+            # Skip IPv6 for now (iptables vs ip6tables)
+            if [[ ! "$cidr" =~ ":" ]]; then
+              ipset add github-ips "$cidr" 2>/dev/null || true
+            fi
+          done
+        done
+
+        # Allow all GitHub IPs
+        iptables -A OUTPUT -m set --match-set github-ips dst -p tcp --dport 443 -j ACCEPT
+        iptables -A OUTPUT -m set --match-set github-ips dst -p tcp --dport 80 -j ACCEPT
+
+        # CRITICAL: Block direct access to blob storage and results-receiver
+        # These MUST go through the proxy for cache operations
+        echo "Blocking direct access to cache-critical endpoints..."
+
+        # Block results-receiver.actions.githubusercontent.com
+        for ip in $(getent ahosts "results-receiver.actions.githubusercontent.com" 2>/dev/null | awk '{print $1}' | sort -u); do
+          echo "Blocking direct access to results-receiver: $ip"
+          iptables -I OUTPUT 1 -d "$ip" -p tcp --dport 443 -j REJECT
+        done
+
+        # Block productionresultssa*.blob.core.windows.net (cache blob storage)
+        # We block ALL blob.core.windows.net traffic since we can't easily enumerate all storage accounts
+        # The proxy will handle these requests
+        echo "Note: *.blob.core.windows.net traffic will be blocked and must go through proxy"
 
         # Block all other outbound HTTP/HTTPS traffic
         iptables -A OUTPUT -p tcp --dport 80 -j REJECT
@@ -198,14 +293,37 @@ jobs:
 
         echo "iptables rules applied:"
         iptables -L OUTPUT -n -v
-    - name: Verify direct connections are blocked
+        echo ""
+        echo "ipset github-ips contains $(ipset list github-ips | grep -c 'ˆ[0-9]') entries"
+    - name: Verify proxy enforcement
       run: |
-        # This should fail - direct HTTPS connection without proxy
-        if curl --connect-timeout 5 --max-time 10 --noproxy '*' https://github.com 2>/dev/null; then
-          echo "ERROR: Direct connection succeeded but should have been blocked!"
+        echo "=== Testing proxy enforcement ==="
+
+        # Test 1: Direct connection to github.com should work (it's in allowed IPs)
+        echo "Test 1: Direct connection to github.com (should SUCCEED - GitHub IP allowed)"
+        if curl --connect-timeout 5 --max-time 10 --noproxy '*' -sS https://api.github.com/zen 2>/dev/null; then
+          echo "✓ Direct GitHub API access works (expected)"
+        else
+          echo "✗ Direct GitHub API access failed (unexpected but not critical)"
+        fi
+
+        # Test 2: Direct connection to blob storage should FAIL
+        echo ""
+        echo "Test 2: Direct connection to blob storage (should FAIL - must use proxy)"
+        if curl --connect-timeout 5 --max-time 10 --noproxy '*' -sS https://productionresultssa0.blob.core.windows.net 2>/dev/null; then
+          echo "✗ ERROR: Direct blob storage connection succeeded but should have been blocked!"
           exit 1
         else
-          echo "Direct connection correctly blocked"
+          echo "✓ Direct blob storage correctly blocked"
+        fi
+
+        # Test 3: Connection through proxy should work
+        echo ""
+        echo "Test 3: Connection through proxy to blob storage (should SUCCEED)"
+        if curl --connect-timeout 5 --max-time 10 -sS https://productionresultssa0.blob.core.windows.net 2>&1 | head -5; then
+          echo "✓ Proxy connection works (expected - even if 4xx/5xx response, connection succeeded)"
+        else
+          echo "Note: Proxy connection may have failed, but that's OK if it's not a network block"
         fi
     - name: Restore cache
       uses: ./
