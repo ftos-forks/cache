@@ -169,10 +169,13 @@ jobs:
           iptables -I OUTPUT 1 -d "$ip" -p tcp --dport 443 -j REJECT
         done
 
-        # Block productionresultssa*.blob.core.windows.net (cache blob storage)
-        # We block ALL blob.core.windows.net traffic since we can't easily enumerate all storage accounts
-        # The proxy will handle these requests
-        echo "Note: *.blob.core.windows.net traffic will be blocked and must go through proxy"
+        # Block blob.core.windows.net (Azure blob storage used for cache)
+        for host in productionresultssa0.blob.core.windows.net productionresultssa1.blob.core.windows.net productionresultssa2.blob.core.windows.net productionresultssa3.blob.core.windows.net; do
+          for ip in $(getent ahosts "$host" 2>/dev/null | awk '{print $1}' | sort -u); do
+            echo "Blocking direct access to blob storage ($host): $ip"
+            iptables -I OUTPUT 1 -d "$ip" -p tcp --dport 443 -j REJECT
+          done
+        done
 
         # Block all other outbound HTTP/HTTPS traffic
         iptables -A OUTPUT -p tcp --dport 80 -j REJECT
@@ -326,10 +329,13 @@ jobs:
           iptables -I OUTPUT 1 -d "$ip" -p tcp --dport 443 -j REJECT
         done
 
-        # Block productionresultssa*.blob.core.windows.net (cache blob storage)
-        # We block ALL blob.core.windows.net traffic since we can't easily enumerate all storage accounts
-        # The proxy will handle these requests
-        echo "Note: *.blob.core.windows.net traffic will be blocked and must go through proxy"
+        # Block blob.core.windows.net (Azure blob storage used for cache)
+        for host in productionresultssa0.blob.core.windows.net productionresultssa1.blob.core.windows.net productionresultssa2.blob.core.windows.net productionresultssa3.blob.core.windows.net; do
+          for ip in $(getent ahosts "$host" 2>/dev/null | awk '{print $1}' | sort -u); do
+            echo "Blocking direct access to blob storage ($host): $ip"
+            iptables -I OUTPUT 1 -d "$ip" -p tcp --dport 443 -j REJECT
+          done
+        done
 
         # Block all other outbound HTTP/HTTPS traffic
         iptables -A OUTPUT -p tcp --dport 80 -j REJECT
