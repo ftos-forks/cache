@@ -108,6 +108,9 @@ jobs:
         apt-get update
         apt-get install -y iptables dnsutils curl jq ipset
     - name: Fetch GitHub meta and configure firewall
+      env:
+        http_proxy: http://squid-proxy:3128
+        https_proxy: http://squid-proxy:3128
       run: |
         # Fetch GitHub meta API to get all IP ranges
         echo "Fetching GitHub meta API..."
@@ -349,6 +352,9 @@ jobs:
         apt-get update
         apt-get install -y iptables dnsutils curl jq ipset
     - name: Fetch GitHub meta and configure firewall
+      env:
+        http_proxy: http://squid-proxy:3128
+        https_proxy: http://squid-proxy:3128
       run: |
         # Fetch GitHub meta API to get all IP ranges
         echo "Fetching GitHub meta API..."
